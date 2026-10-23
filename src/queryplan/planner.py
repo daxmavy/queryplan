@@ -174,7 +174,7 @@ class Problem:
                     continue
                 for st in group:
                     share = avail_q / len(group)
-                    conc = min(share, MAX_CONCURRENCY)
+                    conc = min(max(share, 1.0), MAX_CONCURRENCY)  # a server always runs at least one whole request
                     tokens = speeds[(model, st.slot.hw, st.slot.size)].rate(conc) * dt
                     for f in pool:
                         if tokens <= 0:

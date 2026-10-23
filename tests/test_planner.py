@@ -83,3 +83,13 @@ def test_memory_limits_are_respected():
     plan = optimise(Problem(classes, small, cost))
     assert plan.phases["gpu0"] == []
     assert plan.phases["gpu1"][0].models == ("big",)
+
+
+def test_one_gpu_cycling_three_models_finishes():
+    classes = {}
+    for e, gen in (("e1", "a"), ("e2", "b")):
+        classes[f"{e}|g"] = ClassState(id=f"{e}|g", experiment=e, tier=0, model=gen, depth=1, total=8, out_tokens=120)
+        classes[f"{e}|j"] = ClassState(id=f"{e}|j", experiment=e, tier=0, model="j", depth=2, total=8,
+                                       out_tokens=250, parents=(f"{e}|g",))
+    plan = optimise(Problem(classes, slots(1), CostModel()))
+    assert all(x < float("inf") for x in plan.predicted_tiers)
