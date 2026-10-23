@@ -88,6 +88,8 @@ def main() -> None:
     parser.add_argument("--first", default=None, help="experiment to put in its own top tier")
     parser.add_argument("--replan", type=float, default=120)
     parser.add_argument("--fake", action="store_true", help="simulated servers instead of vLLM")
+    parser.add_argument("--local-snapshots", default=None,
+                        help="serve models from this Hugging Face hub cache directory, with no hub lookups")
     args = parser.parse_args()
 
     exps = experiments(args.units, args.experiments)
@@ -107,7 +109,8 @@ def main() -> None:
                                  reply=lambda model, text, rng: f"{model.name} says Score: {rng.randint(1, 9)}")
     started = time.time()
     result = qp.run(tiers, slots=slots, store=args.store, cost_model=args.cost_model, backend=backend,
-                    policy=args.policy, save_cost_model=args.cost_model, replan_seconds=args.replan)
+                    policy=args.policy, save_cost_model=args.cost_model, replan_seconds=args.replan,
+                    vllm_options={"local_snapshots": args.local_snapshots} if args.local_snapshots else None)
     report = result.report.as_dict()
     report.update({"started": started, "units": args.units, "experiments": [e.name for e in exps],
                    "first": args.first, "fake": args.fake, "hw": args.hw,

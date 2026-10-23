@@ -42,7 +42,8 @@ class Result:
 def run(tiers: Sequence[Experiment | Sequence[Experiment]], *, slots: list[Slot], store: str | Path,
         cost_model: CostModel | str | Path | None = None, backend: Any = "vllm", policy: str = "plan",
         save_cost_model: str | Path | None = None, site_plan: "SitePlan | str | Path | None" = None,
-        site: str | None = None, imports: Sequence[str | Path] = (), **options: Any) -> Result:
+        site: str | None = None, imports: Sequence[str | Path] = (), vllm_options: dict[str, Any] | None = None,
+        **options: Any) -> Result:
     """Trace the experiments and run them.
 
     `tiers` is a list whose entries are experiments or groups of experiments, highest priority first. Each tier is
@@ -54,6 +55,8 @@ def run(tiers: Sequence[Experiment | Sequence[Experiment]], *, slots: list[Slot]
 
     With `site_plan` (from `qp.split`) and `site`, only that site's share of the graph runs; `imports` are the
     `results.jsonl` files of earlier sites, which supply the values crossing into this one.
+
+    `vllm_options` go to `VLLMBackend` (for example `local_snapshots=` a Hugging Face hub cache to serve from).
     """
     groups = [[t] if isinstance(t, Experiment) else list(t) for t in tiers]
     experiments = [e for g in groups for e in g]
@@ -64,7 +67,7 @@ def run(tiers: Sequence[Experiment | Sequence[Experiment]], *, slots: list[Slot]
         cost = cost_model or CostModel()
     store_obj = Store(store)
     if backend == "vllm":
-        backend = VLLMBackend(store_obj.path / "logs")
+        backend = VLLMBackend(store_obj.path / "logs", **(vllm_options or {}))
     only = imported = None
     if site_plan is not None:
         plan = site_plan if isinstance(site_plan, SitePlan) else SitePlan.load(site_plan)
