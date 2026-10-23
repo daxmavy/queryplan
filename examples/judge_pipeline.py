@@ -25,8 +25,9 @@ QWEN = qp.local("Qwen/Qwen3.8-27B", temperature=0.8, top_p=0.95, max_tokens=400,
 GEMMA = qp.local("google/gemma-4-26B-A4B-it", temperature=0.8, top_p=0.95, max_tokens=400, seed=0,
                  chat_template_kwargs={"enable_thinking": False},
                  serve_args=["--max-model-len", "16384", "--max-num-seqs", "192"], label="gemma")
-JUDGE = qp.local("openai/gpt-oss-120b", temperature=0.1, max_tokens=1200, seed=0, reasoning_effort="low",
-                 serve_args=["--max-model-len", "16384", "--max-num-seqs", "192"], label="gpt-oss")
+JUDGE = qp.local("google/gemma-4-31B-it", temperature=0.1, max_tokens=300, seed=0,
+                 chat_template_kwargs={"enable_thinking": False},
+                 serve_args=["--max-model-len", "16384", "--max-num-seqs", "192"], label="gemma-judge")
 
 STYLES = {
     "plain": "Write in a plain, factual style.",
@@ -100,7 +101,7 @@ def main() -> None:
              else qp.visible_gpus(hw=args.hw, mem_gb=args.mem))
     backend = "vllm"
     if args.fake:
-        backend = qp.FakeBackend(load_s={QWEN.model: 120, GEMMA.model: 100, JUDGE.model: 180},
+        backend = qp.FakeBackend(load_s={QWEN.model: 120, GEMMA.model: 100, JUDGE.model: 140},
                                  theta={QWEN.model: 2500, GEMMA.model: 4000, JUDGE.model: 3500},
                                  out_tokens={QWEN.model: 120, GEMMA.model: 120, JUDGE.model: 250}, speedup=50,
                                  reply=lambda model, text, rng: f"{model.name} says Score: {rng.randint(1, 9)}")

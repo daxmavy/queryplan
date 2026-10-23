@@ -9,7 +9,7 @@ import argparse
 import json
 from pathlib import Path
 
-COLOURS = {"qwen": "#4C72B0", "gemma": "#DD8452", "gpt-oss": "#55A868"}
+COLOURS = {"qwen": "#4C72B0", "gemma": "#DD8452", "gemma-judge": "#55A868"}
 
 
 def load(run: Path) -> dict:

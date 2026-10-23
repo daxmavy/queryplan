@@ -54,13 +54,14 @@ class RunReport:
 class Runner:
     def __init__(self, graph: Graph, tiers: list[list[str]], slots: list[Slot], backend: Any, cost: CostModel,
                  store: Store, policy: str = "plan", replan_seconds: float = 120.0, min_gain: float = 0.03,
-                 pilot_units: int = 2, max_inflight: int = 256, log: Callable[[str], None] = print, seed: int = 0,
+                 pilot_units: int = 2, max_inflight: int = 256, log: Callable[[str], None] | None = None, seed: int = 0,
                  only: set[str] | None = None, imported: dict[str, Any] | None = None):
         if policy not in ("plan", "naive"):
             raise ValueError("policy must be 'plan' or 'naive'")
         self.graph, self.slots, self.backend, self.cost, self.store = graph, slots, backend, cost, store
         self.policy, self.replan_seconds, self.min_gain = policy, replan_seconds, min_gain
-        self.max_inflight, self.log, self.pilot_units = max_inflight, log, pilot_units
+        self.max_inflight, self.pilot_units = max_inflight, pilot_units
+        self.log = log or (lambda line: print(line, flush=True))  # flushed, so a log file shows progress as it happens
         self.rng = random.Random(seed)
         self.scope = set(only) if only is not None else set(graph.nodes)  # the nodes this run executes
         self.imported = imported or {}  # values produced elsewhere (another site)
