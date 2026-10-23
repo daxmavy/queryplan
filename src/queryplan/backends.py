@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import random
 import signal
@@ -83,7 +84,8 @@ class VLLMBackend:
     """Starts one OpenAI-compatible `vllm serve` process per resident model, pinned to the slot's GPUs."""
 
     def __init__(self, log_dir: str | Path, port_base: int | None = None, vllm: str | None = None,
-                 extra_env: dict[str, str] | None = None, ready_timeout: float = 3600):
+                 extra_env: dict[str, str] | None = None, ready_timeout: float = 3600,
+                 local_snapshots: str | Path | None = None):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         default_base = os.environ.get("QUERYPLAN_PORT_BASE") or (
@@ -93,6 +95,9 @@ class VLLMBackend:
                                         else python_vllm())
         self.extra_env = extra_env or {}
         self.ready_timeout = ready_timeout
+        # serve each model from its folder in this Hugging Face hub cache, so no hub lookup happens at all (useful on a
+        # shared cache that is incomplete or not writable)
+        self.local_snapshots = Path(local_snapshots).expanduser() if local_snapshots else None
         import httpx  # imported here so the package imports without it (tests use FakeBackend)
 
         self._httpx = httpx
@@ -101,8 +106,11 @@ class VLLMBackend:
 
     async def start(self, model: LocalModel, slot: Slot) -> VLLMServer:
         port = free_port(self.port_base + 10 * int(slot.gpus[0]))
-        args = [*self.vllm, "serve", model.model, "--host", "127.0.0.1", "--port", str(port),
+        source = snapshot_dir(self.local_snapshots, model.model) if self.local_snapshots else None
+        args = [*self.vllm, "serve", str(source or model.model), "--host", "127.0.0.1", "--port", str(port),
                 "--tensor-parallel-size", str(slot.size), *model.serve_args]
+        if source is not None:
+            args += ["--served-model-name", model.model]
         if "--gpu-memory-utilization" not in model.serve_args:
             args += ["--gpu-memory-utilization", f"{gpu_memory_share(slot.gpus):.2f}"]
         env = {**os.environ, **self.extra_env, "CUDA_VISIBLE_DEVICES": ",".join(map(str, slot.gpus)),
@@ -189,6 +197,21 @@ class FakeBackend:
 
     async def close(self) -> None:
         pass
+
+
+def snapshot_dir(hub: Path, model: str) -> Path | None:
+    """The newest complete snapshot of `model` in a Hugging Face hub cache directory, or None."""
+    root = hub / f"models--{model.replace('/', '--')}" / "snapshots"
+    candidates = [d for d in root.glob("*") if (d / "config.json").exists() and _weights_complete(d)]
+    return max(candidates, key=lambda d: d.stat().st_mtime) if candidates else None
+
+
+def _weights_complete(snapshot: Path) -> bool:
+    index = snapshot / "model.safetensors.index.json"
+    if index.exists():
+        shards = set(json.loads(index.read_text())["weight_map"].values())
+        return all((snapshot / shard).exists() for shard in shards)
+    return any(snapshot.glob("*.safetensors"))
 
 
 def gpu_memory_share(gpus: tuple[int, ...], ceiling: float = 0.90, floor: float = 0.50) -> float:

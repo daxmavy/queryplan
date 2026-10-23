@@ -92,3 +92,30 @@ def test_cost_model_round_trips(tmp_path):
     assert loaded.observations == result.cost_model.observations
     merged = qp.CostModel.merge(loaded, loaded)
     assert len(merged.observations) == 2 * len(loaded.observations)
+
+
+def test_snapshot_dir_picks_a_complete_snapshot(tmp_path):
+    from queryplan.backends import snapshot_dir
+    root = tmp_path / "models--org--m" / "snapshots"
+    (root / "partial").mkdir(parents=True)
+    (root / "partial" / "README.md").write_text("x")
+    full = root / "full"
+    full.mkdir()
+    (full / "config.json").write_text("{}")
+    (full / "model.safetensors").write_text("")
+    assert snapshot_dir(tmp_path, "org/m") == full
+    assert snapshot_dir(tmp_path, "org/other") is None
+
+
+def test_snapshot_dir_skips_snapshots_missing_indexed_shards(tmp_path):
+    import json as _json
+    from queryplan.backends import snapshot_dir
+    snap = tmp_path / "models--org--m" / "snapshots" / "a"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text("{}")
+    (snap / "model-1.safetensors").write_text("")
+    (snap / "model.safetensors.index.json").write_text(_json.dumps({"weight_map": {"x": "model-1.safetensors",
+                                                                                   "y": "model-2.safetensors"}}))
+    assert snapshot_dir(tmp_path, "org/m") is None
+    (snap / "model-2.safetensors").write_text("")
+    assert snapshot_dir(tmp_path, "org/m") == snap
