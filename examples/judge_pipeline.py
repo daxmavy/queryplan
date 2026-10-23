@@ -21,13 +21,13 @@ import queryplan as qp
 
 QWEN = qp.local("Qwen/Qwen3.8-27B", temperature=0.8, top_p=0.95, max_tokens=400, seed=0,
                 chat_template_kwargs={"enable_thinking": False},
-                serve_args=["--max-model-len", "16384", "--max-num-seqs", "192"], label="qwen")
+                serve_args=["--max-model-len", "4096", "--max-num-seqs", "192"], label="qwen")
 GEMMA = qp.local("google/gemma-4-26B-A4B-it", temperature=0.8, top_p=0.95, max_tokens=400, seed=0,
                  chat_template_kwargs={"enable_thinking": False},
-                 serve_args=["--max-model-len", "16384", "--max-num-seqs", "192"], label="gemma")
+                 serve_args=["--max-model-len", "4096", "--max-num-seqs", "192"], label="gemma")
 JUDGE = qp.local("google/gemma-4-31B-it", temperature=0.1, max_tokens=300, seed=0,
                  chat_template_kwargs={"enable_thinking": False},
-                 serve_args=["--max-model-len", "16384", "--max-num-seqs", "192"], label="gemma-judge")
+                 serve_args=["--max-model-len", "4096", "--max-num-seqs", "192"], label="gemma-judge")
 
 STYLES = {
     "plain": "Write in a plain, factual style.",
@@ -96,6 +96,8 @@ def main() -> None:
     tiers: list = exps
     if args.first:
         first = [e for e in exps if e.name == args.first]
+        if not first:
+            parser.error(f"--first {args.first} is not one of {[e.name for e in exps]}")
         tiers = [first, [e for e in exps if e.name != args.first]]
     else:
         tiers = [exps]
