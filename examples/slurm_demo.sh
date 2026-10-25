@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=queryplan-demo
-#SBATCH --output=logs/%x_%j.out
+#SBATCH --output=%x_%j.out
 #SBATCH --nodes=1
 #SBATCH --gpus=4
 #SBATCH --time=03:00:00
