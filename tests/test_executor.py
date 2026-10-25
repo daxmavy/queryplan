@@ -25,10 +25,10 @@ def make_experiments(n_units=30):
     return [build("e1", gen_a), build("e2", gen_b), build("e3", gen_a), build("e4", gen_b)]
 
 
-def backend():
+def backend(speedup=400):
     return qp.FakeBackend(load_s={"gen-a": 60, "gen-b": 60, "judge": 60},
                           theta={"gen-a": 2000, "gen-b": 2000, "judge": 3000},
-                          out_tokens={"gen-a": 300, "gen-b": 300, "judge": 20}, speedup=400)
+                          out_tokens={"gen-a": 300, "gen-b": 300, "judge": 20}, speedup=speedup)
 
 
 def test_runs_everything_and_fills_values(tmp_path):
@@ -58,9 +58,9 @@ def test_validator_retries_until_valid_or_attempts_run_out(tmp_path):
 
 def test_plan_beats_naive_on_shared_models(tmp_path):
     slots = qp.gpus([0, 1], hw="sim", mem_gb=80)
-    naive = qp.run(make_experiments(), slots=slots, store=tmp_path / "naive", backend=backend(), policy="naive",
+    naive = qp.run(make_experiments(), slots=slots, store=tmp_path / "naive", backend=backend(100), policy="naive",
                    log=lambda _: None)
-    planned = qp.run(make_experiments(), slots=slots, store=tmp_path / "plan", backend=backend(),
+    planned = qp.run(make_experiments(), slots=slots, store=tmp_path / "plan", backend=backend(100),
                      cost_model=naive.cost_model, log=lambda _: None)
     assert planned.report.loads < naive.report.loads
     assert planned.report.wall_seconds < naive.report.wall_seconds
@@ -83,6 +83,52 @@ def test_resume_skips_completed_nodes(tmp_path):
                    log=lambda _: None)
     assert fake.starts == []
     assert again.values == first.values
+
+
+def test_unload_events_name_the_model_that_was_unloaded(tmp_path):
+    qp.run(make_experiments(5), slots=qp.gpus([0], hw="sim", mem_gb=80), store=tmp_path / "s", backend=backend(),
+           policy="naive", log=lambda _: None)
+    events = [json.loads(l) for l in (tmp_path / "s" / "events.jsonl").read_text().splitlines()]
+    resident = {}
+    unloads = 0
+    for e in events:
+        if e["event"] == "load_done":
+            resident[e["slot"]] = e["model"]
+        elif e["event"] == "unload":
+            assert e["model"] == resident.pop(e["slot"])
+            unloads += 1
+    assert unloads >= 3
+
+
+def test_dispatch_carries_on_while_the_planner_solves(tmp_path, monkeypatch):
+    import time
+    from queryplan import executor
+
+    windows = []
+    real = executor.optimise
+
+    def slow(problem, *args, **kwargs):
+        if windows:  # every replan after the first plan takes half a second
+            started = time.time()
+            time.sleep(0.5)
+            windows.append((started, time.time()))
+        else:
+            windows.append(None)
+        return real(problem, *args, **kwargs)
+
+    @qp.experiment("only")
+    def only():
+        for i in range(400):
+            yield qp.llm(gen_a, f"prompt {i}")
+
+    monkeypatch.setattr(executor, "optimise", slow)
+    qp.run([only], slots=qp.gpus([0], hw="sim", mem_gb=80), store=tmp_path / "s", backend=backend(100),
+           replan_seconds=0.3, max_inflight=4, log=lambda _: None)
+    starts = [o["t"] - o["seconds"] for o in map(json.loads, (tmp_path / "s" / "observations.jsonl").open())
+              if o["type"] == "request"]
+    solving = [(a, b) for a, b in windows[1:] if b < max(starts)]  # a solve can outlast the work
+    assert solving, "no replan happened"
+    assert all(any(a + 0.1 < s < b for s in starts) for a, b in solving)
 
 
 def test_cost_model_round_trips(tmp_path):
