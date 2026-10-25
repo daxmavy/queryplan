@@ -76,7 +76,7 @@ These were settled in a long design discussion; `docs/design.md` has the maths.
 | `examples/summarise_runs.py` | markdown table and GPU timeline PNG from finished runs |
 | `examples/simulate_scenarios.py` | predicted naive vs planned across workload shapes, from the planner's simulator |
 | `examples/site.env.example` | template for the untracked site environment file |
-| `tests/` | 33 tests; `uv venv && uv pip install -e '.[dev]' pytest-timeout && .venv/bin/pytest -q --timeout 120` |
+| `tests/` | 46 tests (`fake_vllm.py` stands in for `vllm serve`); `uv venv && uv pip install -e '.[dev]' pytest-timeout && .venv/bin/pytest -q --timeout 120` |
 
 All work went through PRs #1–#9, merged to `main`. The repo is in self-merge mode: branch, open a PR, merge it
 yourself, never push `main`. The operator has not yet applied branch rulesets to this repo.
@@ -221,7 +221,7 @@ The operator's CLAUDE.md says which skills to load before touching the cluster.
 | low | src/queryplan/planner.py:247 | A class whose queries hang off different parent classes is released at the slowest parent's rate, so times are badly overestimated | not verified |
 | low | src/queryplan/backends.py:116 | The server's CUDA_VISIBLE_DEVICES replaces the driver's inherited restriction instead of indexing into it | 0/3 (refuted) |
 
-**Must fix before the timed runs**, because these change or invalidate the demo's numbers:
+**Must fix before the timed runs**, because these change or invalidate the demo's numbers. **All fixed on 2026-10-25** by the `train/mustfix/*` PR train, each with red/green tests:
 
 - the products cap;
 - servers left running on failure;
@@ -233,13 +233,15 @@ The operator's CLAUDE.md says which skills to load before touching the cluster.
 - `logs/` for the Slurm output;
 - unload events naming the wrong model.
 
-Fix these with red/green tests. The other findings matter for users, but not for the demo.
+Also fixed on the way: the speed fit's fallbacks now report peak throughput, `wall_seconds` no longer includes server teardown, and the plan-versus-naive test no longer flakes. The other findings matter for users, but not for the demo.
+
+Note for the results: the demo's products now vary by audience as well ("budget kettle for students"), so prompts differ from the 2026-10-23 runs; the demo refuses more than 1000 products.
 
 ## 6. What is left, in order
 
 1. **Check the two cluster jobs** (section 4). If either finished, pull `runs/*/*/report.json`, `events.jsonl`,
    `observations.jsonl` and `cost.json` back. They are useful as a first cost model, even if the runs are discarded.
-2. **Fix the must-fix list** in section 5, one PR each or a short PR train. Keep the 33 tests green and add tests.
+2. ~~Fix the must-fix list~~ — done 2026-10-25 (section 5).
 3. **Smoke test on both sites again** with `SEQUENCE=smoke`.
    - Site A: on a free GPU, with `EXTRA_ARGS="--local-snapshots <shared hub dir>"`, `HW` and `MEM` set.
    - Site B: 2 GPUs, `--time 00:45:00 --time-min 00:30:00`.
@@ -280,7 +282,7 @@ Fix these with red/green tests. The other findings matter for users, but not for
 - **Scratch directories disappear on a session restart.** Keep watchers and notes under the untracked `site/`.
 - **"Ready" is not "serving".** The backend sends one real completion before any work.
 - **GPU launchers (like the operator's GPU-server tool) set `CUDA_VISIBLE_DEVICES` and a port base.** The backend
-  reads `QUERYPLAN_PORT_BASE`; set it per run to avoid the port-collision bug until that is fixed. Inside Slurm, the
-  port base defaults from `SLURM_JOB_ID`.
+  reads `QUERYPLAN_PORT_BASE`; inside Slurm it defaults from `SLURM_JOB_ID`. Runs sharing a base are safe: each
+  server gets its own API key, and the backend only uses a server that accepts that key and refuses requests without it.
 - **Write output unbuffered.** Driver progress is flushed (`print(..., flush=True)`); keep it that way, or log files
   stay empty for the whole run.
