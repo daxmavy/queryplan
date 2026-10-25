@@ -293,10 +293,11 @@ class Runner:
         if self.policy == "naive":
             plan = naive_plan(problem, self.experiment_order)
         else:
-            plan = await asyncio.to_thread(optimise, problem)  # dispatching carries on while the planner works
-            if self.plan is not None:
-                current = self._remaining_plan()
-                current_result = problem.simulate(current)
+            current = self._remaining_plan() if self.plan is not None else None  # as it stood at the snapshot
+            # in a thread, and run() does not await this, so dispatching carries on while the planner works
+            plan = await asyncio.to_thread(optimise, problem)
+            if current is not None:
+                current_result = await asyncio.to_thread(problem.simulate, current)
                 current_key = current_result.tier_finish
                 new_key = plan.predicted_tiers
                 if not _better(new_key, current_key, self.min_gain):
@@ -398,10 +399,12 @@ class Runner:
                 self._switch(run, target)
 
     def _switch(self, run: SlotRun, target: str | None) -> None:
+        previous = run.model  # run.model names the target from here on
+
         async def go() -> None:
             if run.server is not None:
                 await run.server.stop()
-                self.store.event("unload", slot=run.slot.id, model=self.models[run.model].name if run.model else None)
+                self.store.event("unload", slot=run.slot.id, model=self.models[previous].name if previous else None)
                 run.server = None
             run.model = target
             if target is None:
@@ -498,6 +501,7 @@ class Runner:
         await self._make_plan("start")
         last_plan = time.monotonic()
         pilot_was_pending = bool(self.pilot_pending)
+        planning: asyncio.Task | None = None
         while any(left > 0 for left in self.exp_left.values()):
             if self.error:
                 break
@@ -507,16 +511,24 @@ class Runner:
                 await asyncio.wait_for(self.wake.wait(), timeout=1.0)
             except asyncio.TimeoutError:
                 pass
+            if planning is not None and planning.done():
+                if planning.exception() is not None:
+                    self.error = planning.exception()
+                planning = None
+                last_plan = time.monotonic()
             if self.error:
                 break
             pilot_finished = pilot_was_pending and not any(
                 self.graph.nodes[n].kind == "query" for n in self.pilot_pending)
-            if self.policy == "plan" and (pilot_finished or time.monotonic() - last_plan > self.replan_seconds):
+            if self.policy == "plan" and planning is None and (
+                    pilot_finished or time.monotonic() - last_plan > self.replan_seconds):
                 if pilot_finished:
                     pilot_was_pending = False
                 self._refit()
-                await self._make_plan("pilot finished" if pilot_finished else "periodic")
-                last_plan = time.monotonic()
+                planning = asyncio.ensure_future(self._make_plan("pilot finished" if pilot_finished else "periodic"))
+                planning.add_done_callback(lambda _: self.wake.set())
+        if planning is not None:
+            planning.cancel()  # the work ran out first; the solver thread finishes on its own
         for run in self.slot_runs.values():
             if run.loading is not None and not run.loading.done():
                 run.loading.cancel()  # a model still loading when the work ran out is not needed
