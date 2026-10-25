@@ -95,6 +95,20 @@ def test_one_gpu_cycling_three_models_finishes():
     assert all(x < float("inf") for x in plan.predicted_tiers)
 
 
+def test_queries_in_flight_at_a_replan_still_finish_in_the_simulation():
+    # mid-run: 40 done, 20 more sent to the server and not back yet, 40 waiting
+    classes = {"c": ClassState(id="c", experiment="e", tier=0, model="a", depth=1, total=100, done=40, taken=60,
+                               released=100, out_tokens=200, in_tokens=100)}
+    problem = Problem(classes, slots(1), cost_with(load_s=60, theta=2000, models=["a"]), resident={"gpu0": "a"})
+    plan = optimise(problem)
+    assert plan.predicted_makespan < float("inf")
+    # finishing the 60 left takes about as long as 60 fresh queries, not less
+    fresh = Problem({"c": ClassState(id="c", experiment="e", tier=0, model="a", depth=1, total=60, released=60,
+                                     out_tokens=200, in_tokens=100)},
+                    slots(1), problem.cost, resident={"gpu0": "a"})
+    assert abs(plan.predicted_makespan - optimise(fresh).predicted_makespan) <= 2
+
+
 def _requests(theta, half, n_in, n_out, concurrencies, repeats=5):
     work = n_out + n_in / PREFILL_RATIO
     return [{"type": "request", "model": "m", "hw": "H100", "gpus": 1, "kind": "k|m", "n_in": n_in, "n_out": n_out,

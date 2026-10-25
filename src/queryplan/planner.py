@@ -227,7 +227,8 @@ class _Fluid:
 
     def __post_init__(self) -> None:
         self.done = self.c.done
-        self.taken = self.c.taken
+        # queries in flight (taken but not done) are simulated as waiting: the fluid only completes work it starts
+        self.taken = self.c.done
         self.released = max(self.c.released, self.c.taken)
 
     @property
