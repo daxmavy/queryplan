@@ -39,10 +39,13 @@ ITEMS = ["kettle", "bicycle helmet", "notebook", "rain jacket", "desk lamp", "wa
          "sunscreen", "office chair", "travel mug", "garden hose"]
 QUALITIES = ["budget", "premium", "eco-friendly", "compact", "family-size", "lightweight", "durable", "smart",
              "handmade", "classic"]
+AUDIENCES = ["students", "families", "commuters", "retirees", "travellers"]
 
 
 def products(n: int) -> list[str]:
-    combos = [f"{q} {i}" for q in QUALITIES for i in ITEMS]
+    combos = [f"{q} {i} for {a}" for a in AUDIENCES for q in QUALITIES for i in ITEMS]
+    if n > len(combos):
+        raise ValueError(f"the demo can build at most {len(combos)} distinct products, not {n}")
     return combos[:n]
 
 
