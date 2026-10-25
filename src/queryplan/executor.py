@@ -94,6 +94,7 @@ class Runner:
         self.exp_left: dict[str, int] = {}
         self.error: BaseException | None = None
         self.tasks: set[asyncio.Task] = set()
+        self.planning: asyncio.Task | None = None  # a re-solve running beside dispatch
 
     # ---- setup ---------------------------------------------------------------------------------------------------
     def _choose_pilot(self) -> set[str]:
@@ -489,7 +490,14 @@ class Runner:
 
     # ---- main loop -----------------------------------------------------------------------------------------------
     async def run(self) -> RunReport:
+        """Run the graph. However it ends (finished, failed, cancelled), no model server is left running."""
         self.t0 = time.monotonic()
+        try:
+            return await self._run()
+        finally:
+            await self._shutdown()
+
+    async def _run(self) -> RunReport:
         for exp in self.graph.experiments:
             self.exp_left[exp] = sum(1 for n in self.graph.nodes_of(exp) if n in self.scope)
         self._setup()
@@ -501,7 +509,6 @@ class Runner:
         await self._make_plan("start")
         last_plan = time.monotonic()
         pilot_was_pending = bool(self.pilot_pending)
-        planning: asyncio.Task | None = None
         while any(left > 0 for left in self.exp_left.values()):
             if self.error:
                 break
@@ -511,48 +518,52 @@ class Runner:
                 await asyncio.wait_for(self.wake.wait(), timeout=1.0)
             except asyncio.TimeoutError:
                 pass
-            if planning is not None and planning.done():
-                if planning.exception() is not None:
-                    self.error = planning.exception()
-                planning = None
+            if self.planning is not None and self.planning.done():
+                if self.planning.exception() is not None:
+                    self.error = self.planning.exception()
+                self.planning = None
                 last_plan = time.monotonic()
             if self.error:
                 break
             pilot_finished = pilot_was_pending and not any(
                 self.graph.nodes[n].kind == "query" for n in self.pilot_pending)
-            if self.policy == "plan" and planning is None and (
+            if self.policy == "plan" and self.planning is None and (
                     pilot_finished or time.monotonic() - last_plan > self.replan_seconds):
                 if pilot_finished:
                     pilot_was_pending = False
                 self._refit()
-                planning = asyncio.ensure_future(self._make_plan("pilot finished" if pilot_finished else "periodic"))
-                planning.add_done_callback(lambda _: self.wake.set())
-        if planning is not None:
-            planning.cancel()  # the work ran out first; the solver thread finishes on its own
-        for run in self.slot_runs.values():
-            if run.loading is not None and not run.loading.done():
-                run.loading.cancel()  # a model still loading when the work ran out is not needed
-                try:
-                    await run.loading
-                except BaseException:
-                    pass
-            if run.server is not None:
-                await run.server.stop()
-                self.store.event("unload", slot=run.slot.id, model=self.models[run.model].name if run.model else None)
-                run.server = None
+                self.planning = asyncio.ensure_future(
+                    self._make_plan("pilot finished" if pilot_finished else "periodic"))
+                self.planning.add_done_callback(lambda _: self.wake.set())
         if self.error:
-            for task in list(self.tasks):
-                task.cancel()
-            self.store.close()
             raise self.error
-        wall = time.monotonic() - self.t0
+        wall = time.monotonic() - self.t0  # the work is done; tearing servers down does not count
         self.store.event("run_done", seconds=wall)
-        self.store.close()
         tiers = {t: self.tier_done.get(t, wall) for t in sorted(set(self.tier_of_exp.values()))}
         return RunReport(policy=self.policy, wall_seconds=wall, tier_seconds=tiers, experiment_seconds=self.exp_done,
                          loads=self.loads, load_seconds=self.load_time,
                          queries=sum(1 for _ in self.graph.queries()), output_tokens=self.output_tokens,
                          plans=self.plans_log, slots=[f"{s.id}:{s.hw}x{s.size}" for s in self.slots])
+
+    async def _shutdown(self) -> None:
+        """Stop everything this run started: the solver task, queries in flight, loads, then the servers."""
+        if self.planning is not None:
+            self.planning.cancel()  # the solver thread finishes on its own
+        pending = [t for t in self.tasks if not t.done()]
+        pending += [r.loading for r in self.slot_runs.values() if r.loading is not None and not r.loading.done()]
+        for task in pending:  # queries go first, so a stopped server cannot fail one and hide the real error
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        for run in self.slot_runs.values():
+            if run.server is not None:
+                try:
+                    await run.server.stop()
+                except Exception as exc:  # keep stopping the others
+                    self.log(f"could not stop the server on {run.slot.id}: {exc!r}")
+                self.store.event("unload", slot=run.slot.id, model=self.models[run.model].name if run.model else None)
+                run.server = None
+        self.store.close()
 
     def results(self) -> dict[str, list[Any]]:
         def lookup(key: str) -> Any:  # values another site produces are left as None

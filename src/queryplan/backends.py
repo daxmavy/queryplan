@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 import random
+import resource
+import secrets
 import signal
 import socket
 import subprocess
@@ -40,25 +42,39 @@ class Backend(Protocol):
 
 
 def free_port(start: int) -> int:
+    """The first port from `start` up that nothing holds now. Another process can still take it before the server
+    binds it; `VLLMBackend` gives each server its own key, so a server that is not ours is never used."""
     port = start
     while True:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            if s.connect_ex(("127.0.0.1", port)) != 0:
+            try:
+                s.bind(("127.0.0.1", port))
                 return port
-        port += 1
+            except OSError:
+                port += 1
+
+
+def raise_open_files(want: int = 65536) -> None:
+    """Raise this process's soft limit on open files toward `want`: every request in flight holds a socket."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = want if hard == resource.RLIM_INFINITY else min(want, hard)
+    if soft != resource.RLIM_INFINITY and soft < target:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
 
 
 class VLLMServer:
-    def __init__(self, model: LocalModel, proc: subprocess.Popen, port: int, client: Any, log: Path):
+    def __init__(self, model: LocalModel, proc: subprocess.Popen, port: int, client: Any, log: Path, key: str):
         self.model = model
         self.proc = proc
         self.port = port
         self.client = client
         self.log = log
+        self.headers = {"Authorization": f"Bearer {key}"}
 
     async def complete(self, messages: list[dict[str, str]]) -> Reply:
         body = {"model": self.model.model, "messages": messages, **self.model.request_options()}
-        response = await self.client.post(f"http://127.0.0.1:{self.port}/v1/chat/completions", json=body)
+        response = await self.client.post(f"http://127.0.0.1:{self.port}/v1/chat/completions", json=body,
+                                          headers=self.headers)
         response.raise_for_status()
         data = response.json()
         usage = data.get("usage") or {}
@@ -83,7 +99,7 @@ class VLLMServer:
 class VLLMBackend:
     """Starts one OpenAI-compatible `vllm serve` process per resident model, pinned to the slot's GPUs."""
 
-    def __init__(self, log_dir: str | Path, port_base: int | None = None, vllm: str | None = None,
+    def __init__(self, log_dir: str | Path, port_base: int | None = None, vllm: str | list[str] | None = None,
                  extra_env: dict[str, str] | None = None, ready_timeout: float = 3600,
                  local_snapshots: str | Path | None = None):
         self.log_dir = Path(log_dir)
@@ -91,8 +107,9 @@ class VLLMBackend:
         default_base = os.environ.get("QUERYPLAN_PORT_BASE") or (
             20000 + int(os.environ.get("SLURM_JOB_ID", os.getpid())) % 2000 * 10)
         self.port_base = port_base or int(default_base)
-        self.vllm = [vllm] if vllm else ([os.environ["QUERYPLAN_VLLM"]] if os.environ.get("QUERYPLAN_VLLM")
-                                        else python_vllm())
+        if isinstance(vllm, str):
+            vllm = [vllm]
+        self.vllm = vllm or ([os.environ["QUERYPLAN_VLLM"]] if os.environ.get("QUERYPLAN_VLLM") else python_vllm())
         self.extra_env = extra_env or {}
         self.ready_timeout = ready_timeout
         # serve each model from its folder in this Hugging Face hub cache, so no hub lookup happens at all (useful on a
@@ -101,14 +118,16 @@ class VLLMBackend:
         import httpx  # imported here so the package imports without it (tests use FakeBackend)
 
         self._httpx = httpx
+        raise_open_files()
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(3600.0, connect=30.0),
                                         limits=httpx.Limits(max_connections=2048, max_keepalive_connections=512))
 
     async def start(self, model: LocalModel, slot: Slot) -> VLLMServer:
         port = free_port(self.port_base + 10 * int(slot.gpus[0]))
         source = snapshot_dir(self.local_snapshots, model.model) if self.local_snapshots else None
+        key = secrets.token_hex(16)  # only this server accepts it, so a server from another run is never used
         args = [*self.vllm, "serve", str(source or model.model), "--host", "127.0.0.1", "--port", str(port),
-                "--tensor-parallel-size", str(slot.size), *model.serve_args]
+                "--api-key", key, "--tensor-parallel-size", str(slot.size), *model.serve_args]
         if source is not None:
             args += ["--served-model-name", model.model]
         if "--gpu-memory-utilization" not in model.serve_args:
@@ -118,7 +137,7 @@ class VLLMBackend:
         log = self.log_dir / f"vllm_{slot.id}_{model.name}_{int(time.time())}.log"
         handle = open(log, "w")
         proc = subprocess.Popen(args, stdout=handle, stderr=subprocess.STDOUT, env=env, start_new_session=True)
-        server = VLLMServer(model, proc, port, self.client, log)
+        server = VLLMServer(model, proc, port, self.client, log, key)
         try:
             await self._wait_ready(server, proc, log)
         except BaseException:  # failed or cancelled: never leave a half-started server holding the GPU
@@ -135,8 +154,10 @@ class VLLMBackend:
             if time.monotonic() > deadline:
                 raise TimeoutError(f"vllm serve {model.model} not ready after {self.ready_timeout}s; see {log}")
             try:
-                r = await self.client.get(f"http://127.0.0.1:{port}/health", timeout=5)
-                if r.status_code == 200:
+                # ours accepts our key and refuses requests without it; a server from another run fails one of these
+                url = f"http://127.0.0.1:{port}/v1/models"
+                r = await self.client.get(url, headers=server.headers, timeout=5)
+                if r.status_code == 200 and (await self.client.get(url, timeout=5)).status_code == 401:
                     break
             except self._httpx.HTTPError:
                 pass
@@ -173,6 +194,8 @@ class FakeServer:
         return Reply(text=reply, n_in=n_in, n_out=n_out)
 
     async def stop(self) -> None:
+        if self in self.backend.running:
+            self.backend.running.remove(self)
         await asyncio.sleep(0)
 
 
@@ -189,11 +212,14 @@ class FakeBackend:
         self.speedup = speedup
         self.reply = reply or (lambda model, text, rng: f"{model.name} reply {rng.randint(1, 9)}")
         self.starts: list[tuple[float, str, str]] = []
+        self.running: list[FakeServer] = []  # started and not yet stopped
 
     async def start(self, model: LocalModel, slot: Slot) -> FakeServer:
         self.starts.append((time.monotonic(), slot.id, model.model))
         await asyncio.sleep(self.load_s.get(model.model, 30.0) / self.speedup)
-        return FakeServer(model, self)
+        server = FakeServer(model, self)
+        self.running.append(server)
+        return server
 
     async def close(self) -> None:
         pass
