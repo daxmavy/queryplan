@@ -17,7 +17,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from .costmodel import PREFILL_RATIO, CostModel
+from .costmodel import CostModel, work_tokens
 
 MAX_CONCURRENCY = 256
 EPS = 1e-4  # fluid amounts below this many queries count as zero
@@ -59,7 +59,7 @@ class ClassState:
     @property
     def work_tokens(self) -> float:
         """Output-token-equivalents per query."""
-        return self.out_tokens + self.in_tokens / PREFILL_RATIO
+        return work_tokens(self.in_tokens, self.out_tokens)
 
 
 @dataclass(frozen=True)

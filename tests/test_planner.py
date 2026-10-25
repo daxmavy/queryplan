@@ -1,5 +1,5 @@
 import queryplan as qp
-from queryplan.costmodel import CostModel
+from queryplan.costmodel import DEFAULT_HALF, PREFILL_RATIO, CostModel
 from queryplan.planner import ClassState, Problem, naive_plan, optimise
 
 
@@ -93,3 +93,23 @@ def test_one_gpu_cycling_three_models_finishes():
                                        out_tokens=250, parents=(f"{e}|g",))
     plan = optimise(Problem(classes, slots(1), CostModel()))
     assert all(x < float("inf") for x in plan.predicted_tiers)
+
+
+def _requests(theta, half, n_in, n_out, concurrencies, repeats=5):
+    work = n_out + n_in / PREFILL_RATIO
+    return [{"type": "request", "model": "m", "hw": "H100", "gpus": 1, "kind": "k|m", "n_in": n_in, "n_out": n_out,
+             "seconds": work * (b + half) / theta, "concurrency": b} for b in concurrencies for _ in range(repeats)]
+
+
+def test_speed_fit_counts_long_prompts_once():
+    # a server doing 3000 work tokens/s at peak, on prompts that cost twice as much as the replies
+    cost = CostModel(_requests(theta=3000, half=8, n_in=4000, n_out=100, concurrencies=(4, 16, 64, 128)))
+    speed = cost.speed("m", "H100")
+    assert abs(speed.theta - 3000) / 3000 < 0.01
+    assert abs(speed.half - 8) < 0.5
+
+
+def test_speed_fallback_reports_peak_not_observed_throughput():
+    for concurrencies in ((16,), (16, 16, 16)):  # too few points to fit a slope; concurrency never varied
+        cost = CostModel(_requests(theta=3000, half=DEFAULT_HALF, n_in=200, n_out=200, concurrencies=concurrencies))
+        assert abs(cost.speed("m", "H100").theta - 3000) / 3000 < 0.01

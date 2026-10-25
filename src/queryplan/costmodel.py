@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 DEFAULT_LOAD_S = 120.0
-DEFAULT_THETA = 1500.0  # output tokens per second for one saturated server
+DEFAULT_THETA = 1500.0  # work tokens (see work_tokens) per second for one saturated server
 DEFAULT_HALF = 8.0  # concurrency at which a server reaches half its peak throughput
 DEFAULT_SIGMA = 0.8
 PREFILL_RATIO = 20.0  # input tokens are this many times cheaper than output tokens
@@ -19,12 +19,12 @@ MIN_KIND_OBS = 5  # call sites with fewer observed replies count as unknown (the
 
 @dataclass
 class Speed:
-    theta: float  # peak output tokens/s of one server
+    theta: float  # peak work tokens/s of one server
     half: float  # concurrency at half of peak
     known: bool
 
     def rate(self, concurrency: float) -> float:
-        """Total output tokens/s with `concurrency` requests in flight."""
+        """Total work tokens/s with `concurrency` requests in flight."""
         b = max(concurrency, 0.0)
         return self.theta * b / (b + self.half) if b > 0 else 0.0
 
@@ -140,23 +140,31 @@ def _mean_sd(values: list[float]) -> tuple[float, float]:
     return mean, max(math.sqrt(var), 0.05)
 
 
+def work_tokens(n_in: float, n_out: float) -> float:
+    """Output-token-equivalents of one request: its reply plus its prompt at the prefill discount."""
+    return n_out + n_in / PREFILL_RATIO
+
+
 def _fit_speed(obs: list[dict[str, Any]]) -> Speed:
-    """Fit seconds-per-output-token = (B + half) / theta by least squares on B (mean concurrency of each request)."""
-    points = [(o["concurrency"], o["seconds"] / o["n_out"]) for o in obs
+    """Fit seconds-per-work-token = (B + half) / theta by least squares on B (mean concurrency of each request).
+
+    Theta is in work tokens (`work_tokens`), the unit the planner charges queries in, so a prompt is counted once."""
+    points = [(o["concurrency"], o["seconds"] / work_tokens(o.get("n_in", 0), o["n_out"])) for o in obs
               if o.get("n_out", 0) >= 16 and o.get("seconds", 0) > 0 and o.get("concurrency", 0) > 0]
     if len(points) < 10:
-        total_out = sum(o["n_out"] for o in obs)
+        total = sum(work_tokens(o.get("n_in", 0), o["n_out"]) for o in obs)
         busy = sum(o["seconds"] / max(o.get("concurrency", 1), 1) for o in obs)
-        theta = total_out / busy if busy > 0 else DEFAULT_THETA
+        mean_b = sum(max(o.get("concurrency", 1), 1) for o in obs) / len(obs)
+        # throughput seen at concurrency B is theta * B / (B + half): scale it up to the peak
+        theta = total / busy * (mean_b + DEFAULT_HALF) / mean_b if busy > 0 else DEFAULT_THETA
         return Speed(theta, DEFAULT_HALF, known=len(obs) >= 10)
     n = len(points)
     mx = sum(x for x, _ in points) / n
     my = sum(y for _, y in points) / n
     sxx = sum((x - mx) ** 2 for x, _ in points)
     slope = sum((x - mx) * (y - my) for x, y in points) / sxx if sxx > 0 else 0.0
-    if slope <= 0:  # concurrency barely varied: treat throughput as proportional to concurrency at the mean
-        theta = mx / my
-        return Speed(theta, DEFAULT_HALF, known=True)
+    if slope <= 0:  # concurrency barely varied: assume the default half and solve my = (mx + half) / theta
+        return Speed((mx + DEFAULT_HALF) / my, DEFAULT_HALF, known=True)
     intercept = my - slope * mx
     theta = 1 / slope
     half = max(intercept * theta, 0.5)
